@@ -1,0 +1,147 @@
+#!/usr/bin/env python3
+"""
+Local, Docker-free integration test for the ingestion pipeline logic.
+
+This does NOT talk to real Mongo or RabbitMQ. Instead it simulates the
+exact batching (gateway/main.py's msg_id assignment) and upsert semantics
+(worker/main.py's write_batch, using an in-memory dict instead of a real
+Mongo collection) so you can verify the core correctness properties --
+idempotency and full coverage -- before ever running `docker compose up`.
+
+What it checks:
+  1. Every line in a source file gets a unique, deterministic msg_id.
+  2. Re-processing the same batch twice (simulating a RabbitMQ redelivery
+     after a worker crash) does not create duplicate "documents".
+  3. Every successfully-parsed line ends up written exactly once.
+  4. Malformed lines are skipped, not silently dropped without a trace.
+
+Run:
+    python test_pipeline_local.py sample.log
+"""
+
+import sys
+sys.path.insert(0, "..")  # so `from common.syslog_parser import ...` resolves
+
+from common.syslog_parser import SyslogParseError, parse_line
+
+BATCH_SIZE = 200
+
+
+def build_batches(upload_id: str, lines: list[str]) -> list[dict]:
+    """Mirrors gateway/main.py's ingest() batching logic exactly."""
+    batches = []
+    for offset in range(0, len(lines), BATCH_SIZE):
+        batch_lines = lines[offset: offset + BATCH_SIZE]
+        batches.append({
+            "upload_id": upload_id,
+            "offset": offset,
+            "lines": [
+                {"msg_id": f"{upload_id}:{offset + i}", "raw": line}
+                for i, line in enumerate(batch_lines)
+            ],
+        })
+    return batches
+
+
+class FakeMongoLogs:
+    """In-memory stand-in for the `logs` collection, upsert semantics only."""
+
+    def __init__(self):
+        self.docs = {}  # msg_id -> parsed doc
+        self.upsert_attempts = 0
+        self.upsert_new = 0
+
+    def upsert(self, msg_id: str, parsed: dict):
+        self.upsert_attempts += 1
+        if msg_id not in self.docs:
+            self.docs[msg_id] = parsed
+            self.upsert_new += 1
+        # else: no-op, exactly like $setOnInsert with an existing _id/msg_id
+
+
+def write_batch(fake_db: FakeMongoLogs, lines: list[dict]) -> tuple[int, int]:
+    """Mirrors worker/main.py's write_batch() logic exactly."""
+    written = 0
+    skipped = 0
+    for item in lines:
+        try:
+            parsed = parse_line(item["raw"])
+        except SyslogParseError:
+            skipped += 1
+            continue
+        parsed["msg_id"] = item["msg_id"]
+        before = fake_db.upsert_new
+        fake_db.upsert(item["msg_id"], parsed)
+        if fake_db.upsert_new > before:
+            written += 1
+    return written, skipped
+
+
+def main():
+    if len(sys.argv) != 2:
+        print("Usage: python test_pipeline_local.py <path_to_log_file>", file=sys.stderr)
+        sys.exit(1)
+
+    path = sys.argv[1]
+    with open(path) as f:
+        lines = [l.rstrip("\n") for l in f if l.strip()]
+
+    print(f"Loaded {len(lines)} lines from {path}")
+
+    upload_id = "test-upload-001"
+    batches = build_batches(upload_id, lines)
+    print(f"Built {len(batches)} batches (batch size {BATCH_SIZE})")
+
+    fake_db = FakeMongoLogs()
+
+    # --- First pass: normal processing ---
+    total_written, total_skipped = 0, 0
+    for batch in batches:
+        w, s = write_batch(fake_db, batch["lines"])
+        total_written += w
+        total_skipped += s
+
+    print(f"\n[First pass]")
+    print(f"  written: {total_written}")
+    print(f"  skipped (parse errors): {total_skipped}")
+    print(f"  documents in fake DB: {len(fake_db.docs)}")
+
+    assert total_written + total_skipped == len(lines), (
+        "BUG: written + skipped != total lines -- some lines were neither "
+        "written nor counted as skipped"
+    )
+    assert len(fake_db.docs) == total_written, (
+        "BUG: document count doesn't match written count on first pass"
+    )
+
+    # --- Second pass: simulate RabbitMQ redelivery of ALL batches ---
+    # (worst case: every message gets redelivered, e.g. because a worker
+    # died right before acking everything it had already processed)
+    redeliver_written, redeliver_skipped = 0, 0
+    for batch in batches:
+        w, s = write_batch(fake_db, batch["lines"])
+        redeliver_written += w
+        redeliver_skipped += s
+
+    print(f"\n[Second pass -- full redelivery simulation]")
+    print(f"  newly written (should be 0): {redeliver_written}")
+    print(f"  documents in fake DB (should be unchanged): {len(fake_db.docs)}")
+    print(f"  total upsert attempts across both passes: {fake_db.upsert_attempts}")
+
+    assert redeliver_written == 0, (
+        f"BUG: redelivery created {redeliver_written} NEW documents -- "
+        f"idempotency is broken, this would cause duplicate processing "
+        f"in the real chaos test"
+    )
+    assert len(fake_db.docs) == total_written, (
+        "BUG: document count changed after redelivery -- idempotency broken"
+    )
+
+    print("\nAll idempotency and coverage checks PASSED.")
+    print(f"Expected final Mongo document count after real ingestion: {total_written}")
+    if total_skipped:
+        print(f"({total_skipped} lines were malformed and correctly skipped)")
+
+
+if __name__ == "__main__":
+    main()

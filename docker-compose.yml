@@ -1,0 +1,105 @@
+"""
+Worker node — competing consumer on the RabbitMQ "ingest" queue.
+"""
+
+import asyncio
+import json
+import logging
+import os
+import time
+
+import aio_pika
+from pymongo import MongoClient, UpdateOne
+from pymongo.errors import BulkWriteError
+
+from common.syslog_parser import SyslogParseError, parse_line
+
+RABBITMQ_URL = os.environ["RABBITMQ_URL"]
+MONGO_URI = os.environ["MONGO_URI"]
+INGEST_QUEUE = "ingest"
+LOCK_ID = "purge_lock"
+LOCK_TTL_SECONDS = 30
+PREFETCH_COUNT = 10
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [worker] %(message)s")
+log = logging.getLogger(__name__)
+
+mongo_client = MongoClient(MONGO_URI)
+db = mongo_client.get_default_database()
+
+
+def purge_in_progress() -> bool:
+    lock_doc = db.locks.find_one({"_id": LOCK_ID})
+    if not lock_doc or not lock_doc.get("locked"):
+        return False
+    locked_at = lock_doc.get("locked_at") or 0
+    return (time.time() - locked_at) < LOCK_TTL_SECONDS
+
+
+def write_batch(lines: list[dict]) -> tuple[int, int]:
+    ops = []
+    skipped = 0
+    for item in lines:
+        try:
+            parsed = parse_line(item["raw"])
+        except SyslogParseError as exc:
+            log.warning("skipping unparseable line (msg_id=%s): %s", item["msg_id"], exc)
+            skipped += 1
+            continue
+
+        parsed["msg_id"] = item["msg_id"]
+        ops.append(
+            UpdateOne(
+                {"msg_id": item["msg_id"]},
+                {"$setOnInsert": parsed},
+                upsert=True,
+            )
+        )
+
+    if not ops:
+        return 0, skipped
+
+    try:
+        result = db.logs.bulk_write(ops, ordered=False)
+        written = result.upserted_count
+    except BulkWriteError as exc:
+        written = exc.details.get("nUpserted", 0)
+
+    return written, skipped
+
+
+async def handle_message(message: aio_pika.IncomingMessage):
+    if purge_in_progress():
+        log.info("purge in progress, requeuing message for later")
+        await message.nack(requeue=True)
+        await asyncio.sleep(1)
+        return
+
+    try:
+        payload = json.loads(message.body.decode("utf-8"))
+        written, skipped = write_batch(payload["lines"])
+        log.info(
+            "batch upload_id=%s offset=%s -> written=%d skipped=%d",
+            payload.get("upload_id"), payload.get("offset"), written, skipped,
+        )
+        await message.ack()
+    except Exception:
+        log.exception("failed to process message, will be requeued")
+        await message.nack(requeue=True)
+
+
+async def main():
+    log.info("connecting to RabbitMQ at %s", RABBITMQ_URL)
+    connection = await aio_pika.connect_robust(RABBITMQ_URL)
+    channel = await connection.channel()
+    await channel.set_qos(prefetch_count=PREFETCH_COUNT)
+    queue = await channel.declare_queue(INGEST_QUEUE, durable=True)
+
+    log.info("worker ready, consuming from '%s'", INGEST_QUEUE)
+    async with queue.iterator() as queue_iter:
+        async for message in queue_iter:
+            await handle_message(message)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

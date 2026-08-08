@@ -105,11 +105,15 @@ class CommandDispatcher:
     def handle_purge(args) -> None:
         """
         Handle PURGE command.
-
-        Will be implemented after the distributed
-        purge lock is completed.
         """
 
+        client = GatewayClient(args.gateway_ip)
+
+        result = client.purge()
+
         print(
-            "PURGE not yet implemented."
+            json.dumps(
+                result,
+                indent=2,
+            )
         )

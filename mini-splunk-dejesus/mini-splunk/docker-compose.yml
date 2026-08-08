@@ -1,0 +1,477 @@
+#########################################################
+# Mini-Splunk Distributed Log Analytics Ecosystem
+#
+# NSDSYST Machine Project
+#
+# One-command deployment:
+#
+#     docker compose up --build
+#
+#########################################################
+
+name: minisplunk
+
+#########################################################
+# Common Logging Configuration
+#########################################################
+
+x-default-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+#########################################################
+# Common Healthcheck Configuration
+#########################################################
+
+x-default-healthcheck: &default-healthcheck
+  interval: 10s
+  timeout: 5s
+  retries: 10
+  start_period: 20s
+
+#########################################################
+# Common MongoDB Service Configuration
+#########################################################
+
+x-mongo-common: &mongo-common
+
+  restart: unless-stopped
+
+  networks:
+    - minisplunk-network
+
+  logging:
+    <<: *default-logging
+
+#########################################################
+# Common Python Service Configuration
+#########################################################
+
+x-python-common: &python-common
+
+  restart: unless-stopped
+
+  working_dir: /app
+
+  networks:
+    - minisplunk-network
+
+  logging:
+    <<: *default-logging
+
+#########################################################
+# Common Worker Configuration
+#########################################################
+
+x-worker-common: &worker-common
+
+  <<: *python-common
+
+  build:
+    context: .
+    dockerfile: worker/Dockerfile
+
+  env_file:
+    - configs/app.env.example
+    - configs/docker.env.example
+
+  depends_on:
+
+    rabbitmq:
+      condition: service_healthy
+
+    mongo_init:
+      condition: service_completed_successfully
+
+  command:
+    - python
+    - -m
+    - worker.app.main
+
+#########################################################
+# Services
+#########################################################
+
+services:
+
+  #########################################################
+  # RabbitMQ
+  #########################################################
+
+  rabbitmq:
+
+    image: rabbitmq:${RABBITMQ_VERSION}
+
+    hostname: rabbitmq
+
+    restart: unless-stopped
+
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
+
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+
+    networks:
+      - minisplunk-network
+
+    logging:
+      <<: *default-logging
+
+    healthcheck:
+
+      test:
+        [
+          "CMD",
+          "rabbitmq-diagnostics",
+          "ping"
+        ]
+
+      <<: *default-healthcheck
+
+  #########################################################
+  # MongoDB Config Server
+  #########################################################
+
+  configsvr:
+
+    <<: *mongo-common
+
+    image: mongo:${MONGO_VERSION}
+
+    hostname: configsvr
+
+    command: >
+      mongod
+      --configsvr
+      --replSet ${CONFIG_REPLSET}
+      --bind_ip_all
+      --port ${CONFIG_PORT}
+
+    expose:
+      - "${CONFIG_PORT}"
+
+    volumes:
+      - configsvr-data:/data/db
+
+    healthcheck:
+
+      test:
+        [
+          "CMD",
+          "mongosh",
+          "--port",
+          "${CONFIG_PORT}",
+          "--eval",
+          "db.adminCommand({ ping: 1 })"
+        ]
+
+      <<: *default-healthcheck
+
+  #########################################################
+  # MongoDB Shard Replica Set 1
+  #########################################################
+
+  shard1:
+
+    <<: *mongo-common
+
+    image: mongo:${MONGO_VERSION}
+
+    hostname: shard1
+
+    command: >
+      mongod
+      --shardsvr
+      --replSet ${SHARD1_REPLSET}
+      --bind_ip_all
+      --port ${SHARD_PORT}
+
+    expose:
+      - "${SHARD_PORT}"
+
+    volumes:
+      - shard1-data:/data/db
+
+    healthcheck:
+
+      test:
+        [
+          "CMD",
+          "mongosh",
+          "--port",
+          "${SHARD_PORT}",
+          "--eval",
+          "db.adminCommand({ ping: 1 })"
+        ]
+
+      <<: *default-healthcheck
+
+  #########################################################
+  # MongoDB Shard Replica Set 2
+  #########################################################
+
+  shard2:
+
+    <<: *mongo-common
+
+    image: mongo:${MONGO_VERSION}
+
+    hostname: shard2
+
+    command: >
+      mongod
+      --shardsvr
+      --replSet ${SHARD2_REPLSET}
+      --bind_ip_all
+      --port ${SHARD_PORT}
+
+    expose:
+      - "${SHARD_PORT}"
+
+    volumes:
+      - shard2-data:/data/db
+
+    healthcheck:
+
+      test:
+        [
+          "CMD",
+          "mongosh",
+          "--port",
+          "${SHARD_PORT}",
+          "--eval",
+          "db.adminCommand({ ping: 1 })"
+        ]
+
+      <<: *default-healthcheck
+
+  #########################################################
+  # MongoDB Router (mongos)
+  #########################################################
+
+  mongos:
+
+    <<: *mongo-common
+
+    image: mongo:${MONGO_VERSION}
+
+    hostname: mongos
+
+    command: >
+      mongos
+      --configdb ${CONFIG_REPLSET}/configsvr:${CONFIG_PORT}
+      --bind_ip_all
+      --port ${MONGOS_PORT}
+
+    depends_on:
+
+      configsvr:
+        condition: service_healthy
+
+      shard1:
+        condition: service_healthy
+
+      shard2:
+        condition: service_healthy
+
+    ports:
+      - "${MONGOS_PORT}:${MONGOS_PORT}"
+
+    healthcheck:
+
+      test:
+        [
+          "CMD",
+          "mongosh",
+          "--port",
+          "${MONGOS_PORT}",
+          "--eval",
+          "db.adminCommand({ ping: 1 })"
+        ]
+
+      <<: *default-healthcheck
+
+  #########################################################
+  # MongoDB Bootstrap
+  #########################################################
+
+  mongo_init:
+
+    <<: *python-common
+
+    build:
+      context: .
+      dockerfile: mongo_init/Dockerfile
+
+    hostname: mongo_init
+
+    restart: "no"
+
+    env_file:
+      - configs/app.env.example
+      - configs/docker.env.example
+
+    depends_on:
+
+      configsvr:
+        condition: service_healthy
+
+      shard1:
+        condition: service_healthy
+
+      shard2:
+        condition: service_healthy
+
+      mongos:
+        condition: service_healthy
+
+    command:
+      - python
+      - -m
+      - mongo_init.app.init
+
+  #########################################################
+  # Gateway
+  #########################################################
+
+  gateway:
+
+    <<: *python-common
+
+    build:
+      context: .
+      dockerfile: gateway/Dockerfile
+
+    hostname: gateway
+
+    env_file:
+      - configs/app.env.example
+      - configs/docker.env.example
+
+    environment:
+      GATEWAY_PORT: ${GATEWAY_PORT}
+
+    depends_on:
+
+      rabbitmq:
+        condition: service_healthy
+
+      mongo_init:
+        condition: service_completed_successfully
+
+    ports:
+      - "${GATEWAY_PORT}:${GATEWAY_PORT}"
+
+    command:
+      - python
+      - -m
+      - gateway.app.main
+
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >
+          python -c "import os, urllib.request;
+          urllib.request.urlopen(
+          'http://localhost:' + os.environ['GATEWAY_PORT'] + '/health'
+          )"
+      <<: *default-healthcheck
+
+  #########################################################
+  # Worker 1
+  #########################################################
+
+  worker1:
+
+    <<: *worker-common
+
+    hostname: worker1
+
+  #########################################################
+  # Worker 2
+  #########################################################
+
+  worker2:
+
+    <<: *worker-common
+
+    hostname: worker2
+
+  #########################################################
+  # Worker 3
+  #########################################################
+
+  worker3:
+
+    <<: *worker-common
+
+    hostname: worker3
+
+  #########################################################
+  # CLI
+  #########################################################
+
+  cli:
+
+    <<: *python-common
+
+    build:
+      context: .
+      dockerfile: cli/Dockerfile
+
+    hostname: cli
+
+    restart: "no"
+
+    profiles:
+      - tools
+
+    stdin_open: true
+
+    tty: true
+
+    env_file:
+      - configs/app.env.example
+      - configs/docker.env.example
+
+    depends_on:
+
+      gateway:
+        condition: service_healthy
+
+    command:
+      - python
+      - -m
+      - cli.app.main
+
+#########################################################
+# Volumes
+#########################################################
+
+volumes:
+
+  rabbitmq-data:
+
+  configsvr-data:
+
+  shard1-data:
+
+  shard2-data:
+
+#########################################################
+# Networks
+#########################################################
+
+networks:
+
+  minisplunk-network:
+
+    driver: bridge

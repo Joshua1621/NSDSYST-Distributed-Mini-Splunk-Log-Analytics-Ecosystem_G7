@@ -134,3 +134,21 @@ class GatewayClient:
             "count/keyword",
             value,
         )
+
+    ########################################################
+    # PURGE
+    ########################################################
+
+    def purge(self) -> dict:
+        """
+        Delete all indexed log entries through the Gateway.
+        """
+
+        response = requests.delete(
+            f"{self.base_url}/purge",
+            timeout=60,
+        )
+
+        response.raise_for_status()
+
+        return response.json()

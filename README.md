@@ -205,6 +205,17 @@ From the project root:
 docker compose up --build --scale worker=3
 ```
 
+### FOR TESTING LANG End-to-end automated test (optional)
+
+An automated test script exercises ingest → chaos → query → purge. It requires Docker and `docker compose` on your machine. From the project root run:
+
+```bash
+python scripts/e2e_test.py
+```
+
+The script will build and start the stack, upload `tests/sample_syslog.log`, kill a worker to simulate a failure, run a keyword count query, then purge and teardown the environment.
+
+
 > **Why `--scale worker=3`**: the `deploy.replicas: 3` field in
 > `docker-compose.yml` only takes effect under `docker stack deploy`
 > (Swarm mode) — under plain `docker compose up` it's ignored, so you

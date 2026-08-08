@@ -1,0 +1,121 @@
+#!/usr/bin/env python3
+"""
+Forwarder CLI — the client component of the Mini-Splunk ecosystem.
+
+Usage:
+    python client.py INGEST <file_path> <Gateway_IP[:port]>
+    python client.py QUERY <Gateway_IP[:port]> SEARCH_DATE "<date_string>"
+    python client.py QUERY <Gateway_IP[:port]> SEARCH_HOST <hostname>
+    python client.py QUERY <Gateway_IP[:port]> SEARCH_DAEMON <daemon_name>
+    python client.py QUERY <Gateway_IP[:port]> SEARCH_SEVERITY <severity_level>
+    python client.py QUERY <Gateway_IP[:port]> SEARCH_KEYWORD <keyword>
+    python client.py QUERY <Gateway_IP[:port]> COUNT_KEYWORD <keyword>
+    python client.py PURGE <Gateway_IP[:port]>
+"""
+
+import sys
+
+import requests
+
+
+def _base_url(gateway_addr: str) -> str:
+    if not gateway_addr.startswith("http"):
+        gateway_addr = f"http://{gateway_addr}"
+    return gateway_addr.rstrip("/")
+
+
+def cmd_ingest(file_path: str, gateway_addr: str):
+    url = f"{_base_url(gateway_addr)}/ingest"
+    with open(file_path, "rb") as f:
+        files = {"file": (file_path, f, "text/plain")}
+        resp = requests.post(url, files=files, timeout=60)
+    resp.raise_for_status()
+    data = resp.json()
+    print(f"Ingest accepted: upload_id={data['upload_id']}")
+    print(f"  lines received:    {data['lines_received']}")
+    print(f"  batches published: {data['batches_published']}")
+    print("  (processing happens asynchronously across worker nodes)")
+
+
+def cmd_query(gateway_addr: str, subcommand: str, arg: str):
+    base = _base_url(gateway_addr)
+    endpoint_map = {
+        "SEARCH_DATE": ("/query/date", "date_string"),
+        "SEARCH_HOST": ("/query/host", "hostname"),
+        "SEARCH_DAEMON": ("/query/daemon", "daemon_name"),
+        "SEARCH_SEVERITY": ("/query/severity", "severity_level"),
+        "SEARCH_KEYWORD": ("/query/keyword", "keyword"),
+        "COUNT_KEYWORD": ("/query/count_keyword", "keyword"),
+    }
+    if subcommand not in endpoint_map:
+        print(f"Unknown QUERY subcommand: {subcommand}", file=sys.stderr)
+        sys.exit(1)
+
+    path, param_name = endpoint_map[subcommand]
+    resp = requests.get(f"{base}{path}", params={param_name: arg}, timeout=30)
+    resp.raise_for_status()
+    data = resp.json()
+
+    if subcommand == "COUNT_KEYWORD":
+        print(f"Count for '{data['keyword']}': {data['count']}")
+        return
+
+    results = data.get("results", [])
+    print(f"{len(results)} result(s):")
+    for doc in results:
+        ts = doc.get("timestamp", "?")
+        host = doc.get("hostname", "?")
+        proc = doc.get("process", "?")
+        sev = doc.get("severity", "?")
+        msg = doc.get("message", "")
+        print(f"  [{ts}] {host} {proc} ({sev}): {msg}")
+
+
+def cmd_purge(gateway_addr: str):
+    url = f"{_base_url(gateway_addr)}/purge"
+    resp = requests.post(url, timeout=30)
+    if resp.status_code == 409:
+        print("Purge rejected: another purge is already in progress. Try again shortly.")
+        sys.exit(1)
+    resp.raise_for_status()
+    data = resp.json()
+    print(f"Purge complete: {data['deleted_count']} document(s) deleted.")
+
+
+def main():
+    args = sys.argv[1:]
+    if not args:
+        print(__doc__)
+        sys.exit(1)
+
+    command = args[0].upper()
+
+    if command == "INGEST":
+        if len(args) != 3:
+            print("Usage: client.py INGEST <file_path> <Gateway_IP>", file=sys.stderr)
+            sys.exit(1)
+        cmd_ingest(file_path=args[1], gateway_addr=args[2])
+
+    elif command == "QUERY":
+        if len(args) != 4:
+            print(
+                "Usage: client.py QUERY <Gateway_IP> <SEARCH_*/COUNT_KEYWORD> <arg>",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        cmd_query(gateway_addr=args[1], subcommand=args[2].upper(), arg=args[3])
+
+    elif command == "PURGE":
+        if len(args) != 2:
+            print("Usage: client.py PURGE <Gateway_IP>", file=sys.stderr)
+            sys.exit(1)
+        cmd_purge(gateway_addr=args[1])
+
+    else:
+        print(f"Unknown command: {command}", file=sys.stderr)
+        print(__doc__)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

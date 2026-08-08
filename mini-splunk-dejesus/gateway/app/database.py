@@ -177,9 +177,6 @@ class GatewayRepository:
     def purge(self) -> int:
         """
         Delete all indexed log entries.
-
-        NOTE:
-        Distributed locking will be added in a later phase.
         """
 
         result = self.collection.delete_many({})

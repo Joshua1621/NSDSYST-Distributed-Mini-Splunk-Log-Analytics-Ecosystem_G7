@@ -1,0 +1,81 @@
+"""
+Shared syslog line parser.
+
+Parses standard BSD-style syslog lines into structured fields:
+    Timestamp, Hostname, Process (daemon/tag, optional pid), Severity, Message
+"""
+
+import re
+from datetime import datetime
+
+SEVERITY_NAMES = [
+    "EMERGENCY", "ALERT", "CRITICAL", "ERROR",
+    "WARNING", "NOTICE", "INFO", "DEBUG",
+]
+
+SYSLOG_RE = re.compile(
+    r"^(?:<(?P<pri>\d{1,3})>)?"
+    r"(?P<timestamp>[A-Z][a-z]{2}\s+\d{1,2}\s\d{2}:\d{2}:\d{2})\s+"
+    r"(?P<hostname>\S+)\s+"
+    r"(?P<process>[\w\-/.]+?)(?:\[(?P<pid>\d+)\])?:\s*"
+    r"(?P<message>.*)$"
+)
+
+_SEVERITY_KEYWORDS = [
+    (re.compile(r"\b(emergency|panic)\b", re.I), "EMERGENCY"),
+    (re.compile(r"\balert\b", re.I), "ALERT"),
+    (re.compile(r"\bcritical|fatal\b", re.I), "CRITICAL"),
+    (re.compile(r"\berror|fail(ed|ure)?\b", re.I), "ERROR"),
+    (re.compile(r"\bwarn(ing)?\b", re.I), "WARNING"),
+    (re.compile(r"\bnotice\b", re.I), "NOTICE"),
+    (re.compile(r"\bdebug\b", re.I), "DEBUG"),
+]
+
+
+class SyslogParseError(ValueError):
+    pass
+
+
+def _severity_from_pri(pri: str) -> str:
+    severity_code = int(pri) % 8
+    return SEVERITY_NAMES[severity_code]
+
+
+def _infer_severity(message: str) -> str:
+    for pattern, name in _SEVERITY_KEYWORDS:
+        if pattern.search(message):
+            return name
+    return "INFO"
+
+
+def parse_line(line: str, source_year: int | None = None) -> dict:
+    line = line.rstrip("\n")
+    if not line.strip():
+        raise SyslogParseError("empty line")
+
+    match = SYSLOG_RE.match(line)
+    if not match:
+        raise SyslogParseError(f"line does not match syslog format: {line!r}")
+
+    groups = match.groupdict()
+    year = source_year or datetime.now().year
+
+    try:
+        parsed_ts = datetime.strptime(f"{year} {groups['timestamp']}", "%Y %b %d %H:%M:%S")
+    except ValueError as exc:
+        raise SyslogParseError(f"bad timestamp in line: {line!r}") from exc
+
+    if groups.get("pri") is not None:
+        severity = _severity_from_pri(groups["pri"])
+    else:
+        severity = _infer_severity(groups["message"])
+
+    return {
+        "timestamp": parsed_ts,
+        "hostname": groups["hostname"],
+        "process": groups["process"],
+        "pid": int(groups["pid"]) if groups.get("pid") else None,
+        "severity": severity,
+        "message": groups["message"],
+        "raw": line,
+    }

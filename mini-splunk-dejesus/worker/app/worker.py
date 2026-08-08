@@ -4,11 +4,10 @@ Worker lifecycle and message processing.
 
 from __future__ import annotations
 
-from io import StringIO
-
 from pika.adapters.blocking_connection import BlockingChannel
 from pika.spec import Basic, BasicProperties
 
+from shared.config import settings
 from shared.logging import get_logger
 
 from worker.app.consumer import RabbitMQConsumer
@@ -23,7 +22,7 @@ class Worker:
     Mini-Splunk Worker.
 
     Responsibilities:
-    - Consume RabbitMQ messages
+    - Consume RabbitMQ messages, each holding one batch of lines
     - Parse RFC3164 syslog entries
     - Store parsed logs in MongoDB
     - ACK messages only after successful persistence
@@ -32,7 +31,8 @@ class Worker:
     REQUIRED_FIELDS = (
         "job_id",
         "filename",
-        "content",
+        "batch_index",
+        "lines",
     )
 
     def __init__(self) -> None:
@@ -106,6 +106,30 @@ class Worker:
         return True
 
     ########################################################
+    # Offset Calculation
+    ########################################################
+
+    @staticmethod
+    def compute_base_offset(batch_index: int) -> int:
+        """
+        Compute the global line offset of the first line in a
+        batch.
+
+        Every batch published by the CLI holds up to
+        settings.ingest_batch_size lines (the last batch may hold
+        fewer, if the file's line count isn't an exact multiple of
+        the batch size -- but every batch BEFORE the last one is
+        always exactly full, so the arithmetic below still lands
+        each batch on the correct starting offset regardless of
+        the final batch's actual size). Multiplying by batch_index
+        gives every line in the file a globally unique, stable
+        offset without the Worker needing to know the file's total
+        length in advance.
+        """
+
+        return batch_index * settings.ingest_batch_size
+
+    ########################################################
     # Message Processing
     ########################################################
 
@@ -117,7 +141,7 @@ class Worker:
         message: dict,
     ) -> None:
         """
-        Process one ingestion job.
+        Process one batch of an ingestion job.
         """
 
         ####################################################
@@ -140,9 +164,12 @@ class Worker:
 
         filename = message["filename"]
 
+        batch_index = message["batch_index"]
+
         logger.info(
-            "Processing job %s (%s)",
+            "Processing job %s batch %d (%s)",
             job_id,
+            batch_index,
             filename,
         )
 
@@ -155,8 +182,9 @@ class Worker:
             if self.repository.purge_lock_active():
 
                 logger.warning(
-                    "Purge lock active. Requeueing job %s.",
+                    "Purge lock active. Requeueing job %s batch %d.",
                     job_id,
+                    batch_index,
                 )
 
                 channel.basic_nack(
@@ -167,25 +195,32 @@ class Worker:
                 return
 
             ####################################################
-            # Parse File
+            # Parse Batch
             ####################################################
 
-            stream = StringIO(
-                message["content"]
-            )
+            base_offset = self.compute_base_offset(batch_index)
 
             inserted = 0
             skipped = 0
 
-            for raw_line in stream:
+            for position, raw_line in enumerate(message["lines"]):
 
                 raw_line = raw_line.strip()
 
                 if not raw_line:
                     continue
 
+                # Global offset: stable across redelivery of this
+                # exact batch (same job_id, batch_index, position
+                # always reproduce the same offset), and unique
+                # across every other batch in this job (different
+                # batch_index -> different base_offset range).
+                line_offset = base_offset + position
+
                 parsed = self.parser.parse(
-                    raw_line
+                    raw_line,
+                    job_id,
+                    line_offset,
                 )
 
                 if parsed is None:
@@ -210,10 +245,11 @@ class Worker:
 
             logger.info(
                 (
-                    "Job %s completed successfully. "
+                    "Job %s batch %d completed successfully. "
                     "Inserted=%d Skipped=%d"
                 ),
                 job_id,
+                batch_index,
                 inserted,
                 skipped,
             )
@@ -221,8 +257,9 @@ class Worker:
         except Exception:
 
             logger.exception(
-                "Worker failed processing job %s.",
+                "Worker failed processing job %s batch %d.",
                 job_id,
+                batch_index,
             )
 
             ####################################################

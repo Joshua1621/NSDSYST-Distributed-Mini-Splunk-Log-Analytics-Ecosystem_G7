@@ -5,7 +5,6 @@ Gateway API endpoints.
 from __future__ import annotations
 
 from datetime import datetime
-import uuid
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
@@ -63,43 +62,58 @@ async def ingest(
     request: IngestRequest,
 ) -> IngestResponse:
     """
-    Accept a syslog file and enqueue it for asynchronous
-    processing by the Worker.
+    Accept one batch of syslog lines and enqueue it for
+    asynchronous processing by a Worker.
+
+    A single file upload is split by the client into multiple
+    batches sharing one job_id, each sent as a separate call to
+    this endpoint. The Gateway does not assemble or buffer the
+    full file -- it forwards each batch to RabbitMQ independently
+    and immediately, so no single request, message, or Worker
+    parsing pass needs to hold more than batch_size lines in
+    memory at once.
     """
 
     try:
 
-        job_id = str(uuid.uuid4())
-
         publisher.publish(
             {
-                "job_id": job_id,
+                "job_id": request.job_id,
                 "filename": request.filename,
-                "content": request.content,
+                "batch_index": request.batch_index,
+                "is_final_batch": request.is_final_batch,
+                "lines": request.lines,
                 "received_at": datetime.utcnow().isoformat(),
             }
         )
 
         logger.info(
-            "Accepted ingestion job %s",
-            job_id,
+            "Accepted batch %d for job %s (%d lines, final=%s)",
+            request.batch_index,
+            request.job_id,
+            len(request.lines),
+            request.is_final_batch,
         )
 
         return IngestResponse(
             status="accepted",
-            message="File queued for processing.",
+            message="Batch queued for processing.",
             filename=request.filename,
+            job_id=request.job_id,
+            batch_index=request.batch_index,
         )
 
     except Exception as exc:
 
         logger.exception(
-            "Failed to enqueue ingestion job."
+            "Failed to enqueue batch %d for job %s.",
+            request.batch_index,
+            request.job_id,
         )
 
         raise HTTPException(
             status_code=500,
-            detail="Failed to enqueue ingestion job.",
+            detail="Failed to enqueue ingestion batch.",
         ) from exc
 
 

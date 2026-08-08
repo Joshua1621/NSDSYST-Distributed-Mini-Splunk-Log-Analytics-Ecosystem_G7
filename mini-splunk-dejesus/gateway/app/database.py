@@ -52,12 +52,22 @@ class GatewayRepository:
             Jan
             Jan 10
             Jan 10 12
+
+        The input is whitespace-normalized (collapsed to single
+        spaces) before matching, because stored timestamps are
+        normalized the same way at write time (see
+        SyslogParser.normalize_timestamp). Without this, RFC 3164's
+        extra padding space for single-digit days (e.g. "Aug  4")
+        would make a naturally-typed query like "Aug 4" (one space)
+        fail to match.
         """
+
+        normalized_date = " ".join(date.split())
 
         cursor = self.collection.find(
             {
                 "timestamp": {
-                    "$regex": f"^{re.escape(date)}"
+                    "$regex": f"^{re.escape(normalized_date)}"
                 }
             },
             {

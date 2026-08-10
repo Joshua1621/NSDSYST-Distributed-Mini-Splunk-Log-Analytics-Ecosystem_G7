@@ -1,5 +1,0 @@
-Jul 16 15:20:01 web-1 sshd[123]: Failed password for root
-Jul 16 15:21:10 db-1 mongod[55]: connection accepted
-Jul 16 15:22:33 web-1 nginx[88]: request timeout warning
-Jul 16 15:23:44 api-1 gunicorn[99]: request completed successfully
-Jul 16 15:24:05 db-1 mongod[55]: fatal disk error

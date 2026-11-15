@@ -52,8 +52,7 @@ RabbitMQ management UI:
 
 ```text
 http://localhost:15672
-username: rabbituser
-password: rabbit1234
+Sign in with the RabbitMQ username and password set in `docker-compose.yml`.
 ```
 
 Mini-Splunk browser views:
@@ -98,7 +97,7 @@ python3 -m minisplunk.cli PURGE http://localhost:8080
 ```
 
 Do not use the public mapped ports from inside the VM. For example, from inside
-Server1, use `localhost:8080`, not `103.231.240.136:31523`.
+Server1, use `localhost:8080`, not `<PUBLIC_IP>:31523`.
 
 If you run the CLI from another machine on the same internal network, use the VM's
 internal IP address:
@@ -114,24 +113,24 @@ mappings, use:
 
 | VM      | Ingest API                     | Query API / Web Logs           | RabbitMQ UI                    |
 | ------- | ------------------------------ | ------------------------------ | ------------------------------ |
-| Server0 | `http://103.231.240.136:31722` | `http://103.231.240.136:31522` | `http://103.231.240.136:31922` |
-| Server1 | `http://103.231.240.136:31723` | `http://103.231.240.136:31523` | `http://103.231.240.136:31923` |
-| Server2 | `http://103.231.240.136:31724` | `http://103.231.240.136:31524` | `http://103.231.240.136:31924` |
+| Server0 | `http://<PUBLIC_IP>:31722` | `http://<PUBLIC_IP>:31522` | `http://<PUBLIC_IP>:31922` |
+| Server1 | `http://<PUBLIC_IP>:31723` | `http://<PUBLIC_IP>:31523` | `http://<PUBLIC_IP>:31923` |
+| Server2 | `http://<PUBLIC_IP>:31724` | `http://<PUBLIC_IP>:31524` | `http://<PUBLIC_IP>:31924` |
 
 Example from another machine for Server1:
 
 ```bash
-python3 -m minisplunk.cli INGEST ./sample.log http://103.231.240.136:31723
-python3 -m minisplunk.cli QUERY http://103.231.240.136:31523 SEARCH_HOST web-1
-python3 -m minisplunk.cli QUERY http://103.231.240.136:31523 COUNT_KEYWORD password
-python3 -m minisplunk.cli PURGE http://103.231.240.136:31523
+python3 -m minisplunk.cli INGEST ./sample.log http://<PUBLIC_IP>:31723
+python3 -m minisplunk.cli QUERY http://<PUBLIC_IP>:31523 SEARCH_HOST web-1
+python3 -m minisplunk.cli QUERY http://<PUBLIC_IP>:31523 COUNT_KEYWORD password
+python3 -m minisplunk.cli PURGE http://<PUBLIC_IP>:31523
 ```
 
 Browser views for Server1:
 
 ```text
-http://103.231.240.136:31523/logs
-http://103.231.240.136:31523/nodes
+http://<PUBLIC_IP>:31523/logs
+http://<PUBLIC_IP>:31523/nodes
 ```
 
 Command target summary:
@@ -140,9 +139,9 @@ Command target summary:
 | --------------------------------- | ------------------------------ | ------------------------------ |
 | Inside the VM running Docker      | `http://localhost:8081`        | `http://localhost:8080`        |
 | Same internal VM network          | `http://<VM_IP>:8000`          | `http://<VM_IP>:8080`          |
-| Laptop/public internet to Server0 | `http://103.231.240.136:31722` | `http://103.231.240.136:31522` |
-| Laptop/public internet to Server1 | `http://103.231.240.136:31723` | `http://103.231.240.136:31523` |
-| Laptop/public internet to Server2 | `http://103.231.240.136:31724` | `http://103.231.240.136:31524` |
+| Laptop/public internet to Server0 | `http://<PUBLIC_IP>:31722` | `http://<PUBLIC_IP>:31522` |
+| Laptop/public internet to Server1 | `http://<PUBLIC_IP>:31723` | `http://<PUBLIC_IP>:31523` |
+| Laptop/public internet to Server2 | `http://<PUBLIC_IP>:31724` | `http://<PUBLIC_IP>:31524` |
 
 Ports used by the stack:
 
